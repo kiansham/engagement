@@ -5,3 +5,6 @@ plotly
 openpyxl
 streamlit-option-menu
 streamlit-echarts
+country_converter
+vega_datasets
+altair
