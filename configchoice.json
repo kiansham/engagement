@@ -1,4 +1,3 @@
-
 {
     "gics_sector": [
         "Communication Services",
@@ -43,14 +42,14 @@
         "Other"
     ],
     "milestone": [
+        "Not Started",
         "Initiated",
         "No Response",
         "Negative Response",
-        "Further Meetings",
-        "Issue Acknowledged, Request Not",
-        "Request Acknowledged",
+        "Constructive Response",
+        "Improving Response",
         "Aspiration",
-        "Commitment",
+        "Commitment Made",
         "Partial Disclosure",
         "Full Disclosure",
         "Verified",

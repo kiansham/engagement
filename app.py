@@ -10,15 +10,18 @@ from streamlit_option_menu import option_menu
 from streamlit_echarts import st_echarts
 from typing import Dict, List, Optional, Tuple
 
-## Import only the necessary functions from utils
-from config import Config, CHART_CONFIGS, CSS_STYLES, NAV_STYLES, PAGES_CONFIG
+from config import Config, CHART_CONFIGS, ENHANCED_CSS, NAV_STYLES, PAGES_CONFIG
 from utils import (
     get_latest_view, get_upcoming_tasks,
     create_engagement, log_interaction, update_milestone_status,
     get_lookup_values,
     get_engagement_analytics, get_interactions_for_company,
     load_db,
-    DataValidator
+    DataValidator,
+    render_metrics, create_chart, create_esg_gauge,
+    handle_task_date_display, company_selector_widget, display_interaction_history,
+    get_themes_for_row, render_icon_header, render_hr, create_aggrid_component,
+    get_esg_selection, fix_column_names
 )
 
 st.set_page_config(
@@ -28,348 +31,62 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
-# Enhanced CSS with all aesthetic improvements
-ENHANCED_CSS = CSS_STYLES + """
-<style>
-    /* Enhanced metric containers */
-    div[data-testid="metric-container"] {
-        background-color: #ffffff;
-        border: 1px solid #e9ecef;
-        padding: 16px;
-        border-radius: 8px;
-        box-shadow: 0 2px 4px rgba(0,0,0,0.05);
-        transition: all 0.3s ease;
-    }
-    
-    div[data-testid="metric-container"]:hover {
-        box-shadow: 0 4px 8px rgba(0,0,0,0.1);
-        transform: translateY(-1px);
-    }
-    
-    /* Chart title styling */
-    .chart-title {
-        font-size: 1.2rem;
-        font-weight: 600;
-        color: #262730;
-        margin-bottom: 1rem;
-        padding-bottom: 0.5rem;
-        border-bottom: 2px solid #f0f2f6;
-    }
-    
-    /* Success/Error message styling */
-    .custom-success {
-        background-color: #d4edda;
-        border: 1px solid #c3e6cb;
-        color: #155724;
-        padding: 12px 20px;
-        border-radius: 4px;
-        margin: 10px 0;
-    }
-    
-    .custom-error {
-        background-color: #f8d7da;
-        border: 1px solid #f5c6cb;
-        color: #721c24;
-        padding: 12px 20px;
-        border-radius: 4px;
-        margin: 10px 0;
-    }
-    
-    /* Sidebar filter sections */
-    .sidebar-section {
-        background-color: #f8f9fa;
-        padding: 10px;
-        border-radius: 8px;
-        margin-bottom: 10px;
-    }
-    
-    /* Loading spinner overlay */
-    .loading-overlay {
-        position: fixed;
-        top: 0;
-        left: 0;
-        right: 0;
-        bottom: 0;
-        background: rgba(255,255,255,0.8);
-        display: flex;
-        align-items: center;
-        justify-content: center;
-        z-index: 9999;
-    }
-    
-    /* Enhanced expander styling */
-    .streamlit-expander {
-        border: 1px solid #e0e0e0;
-        border-radius: 8px;
-    }
-</style>
-"""
+st.markdown(
+    '<link href="https://fonts.googleapis.com/icon?family=Material+Icons+Outlined" rel="stylesheet">',
+    unsafe_allow_html=True
+)
 
 st.markdown(ENHANCED_CSS, unsafe_allow_html=True)
 
-# --- REUSABLE UI HELPER FUNCTIONS ---
+def create_alert_section(this_week_tasks, this_month_tasks):
+    col1, col2 = st.columns(2)
+    col1.markdown(f"""<div class=\"alert-urgent\"><strong>📅 {len(this_week_tasks)} Meetings This Week</strong><br>
+                     Meetings within 7 days</div>""", unsafe_allow_html=True)
+    col2.markdown(f"""<div class=\"alert-warning\"><strong>🗓️ {len(this_month_tasks)} Meeting This Month</strong><br>
+                     Meetings within 30 days</div>""", unsafe_allow_html=True)
 
-def show_custom_success(message: str) -> None:
-    """Display a custom styled success message."""
-    st.markdown(f'<div class="custom-success">✅ {message}</div>', unsafe_allow_html=True)
-
-def show_custom_error(message: str) -> None:
-    """Display a custom styled error message."""
-    st.markdown(f'<div class="custom-error">❌ {message}</div>', unsafe_allow_html=True)
-
-def show_chart_title(title: str) -> None:
-    """Display a styled chart title."""
-    st.markdown(f'<div class="chart-title">{title}</div>', unsafe_allow_html=True)
-
-def create_metric_row(metrics: List[tuple]) -> None:
-    """Creates a row of metrics."""
-    cols = st.columns(len(metrics))
-    for col, (label, value) in zip(cols, metrics):
-        col.metric(label, value)
-
-def create_chart(data: pd.Series, title: str, xlab: str, chart_type: str = "bar") -> go.Figure:
-    """Creates a generic bar or pie chart with consistent styling."""
-    if chart_type == "bar":
-        fig = px.bar(x=data.index, y=data.values, title="", labels={"x": "", "y": ""},
-                    color=data.index, color_discrete_sequence=Config.CB_SAFE_PALETTE)
-        fig.update_layout(**CHART_CONFIGS['bar'], paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)')
-        fig.update_xaxes(title="")
-        fig.update_yaxes(title="")
-    elif chart_type == "pie":
-        fig = px.pie(values=data.values, names=data.index, title="", color_discrete_sequence=Config.CB_SAFE_PALETTE)
-        fig.update_layout(paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)')
-    return fig
-
-def create_status_chart(data: pd.DataFrame) -> go.Figure:
-    """Creates the stacked horizontal bar chart for engagement status."""
-    if data.empty:
-        return go.Figure()
-
-    on_time = data.get("on_time", pd.Series(dtype=bool)).sum()
-    late = data.get("late", pd.Series(dtype=bool)).sum()
-    active = len(data[~data.get("is_complete", pd.Series(dtype=bool))])
-
-    fig = go.Figure()
-    colors = [Config.COLORS["success"], Config.COLORS["danger"], Config.COLORS["warning"]]
-
-    for i, (label, value) in enumerate([("On‑time", on_time), ("Late", late), ("Open", active)]):
-        fig.add_bar(y=["Engagements"], x=[value], name=label, orientation="h", marker_color=colors[i])
-
-    fig.update_layout(title="", **CHART_CONFIGS['status'], paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)')
-    return fig
-
-def create_outcome_barchart(data: pd.DataFrame) -> go.Figure:
-    """Creates a vertical bar chart for outcome status."""
-    if data.empty or "outcome_status" not in data.columns:
-        return go.Figure()
-
-    outcome_counts = data["outcome_status"].value_counts().sort_values(ascending=True)
-    if outcome_counts.empty:
-        return go.Figure()
-
-    fig = px.bar(
-        x=outcome_counts.index,           # Categories on X axis
-        y=outcome_counts.values,          # Counts on Y axis
-        labels={'x': 'Outcome Status', 'y': ''},  # Remove Y-axis label
-        color=outcome_counts.index,
-        color_discrete_sequence=px.colors.qualitative.Pastel
+def sidebar_filters(df):
+    st.markdown(
+        f'''
+        <span class="material-icons-outlined" style="vertical-align:middle;color:#333333;font-size:18px;font-weight:300;">{Config.HEADER_ICONS["filter"]}</span>
+        <span style="vertical-align:middle;font-size:18px;font-weight:600;">Filters</span>
+        ''',
+        unsafe_allow_html=True
     )
-    fig.update_layout(
-        showlegend=False,
-        paper_bgcolor='rgba(0,0,0,0)',
-        plot_bgcolor='rgba(0,0,0,0)',
-        margin=dict(l=10, r=10, t=30, b=10),
-        height=300,
-        width=200
-    )
-    return fig
 
-
-def create_info_display(items: List[tuple], use_html: bool = False) -> None:
-    """Creates a row of informational text displays."""
-    cols = st.columns(len(items))
-    for col, (label, value) in zip(cols, items):
-        if use_html:
-            col.markdown(f"**{label}**<br><span style='font-size: 1.1em;'>{value}</span>", unsafe_allow_html=True)
-        else:
-            col.metric(label, value)
-
-def handle_task_date_display(task_date, today) -> None:
-    """Displays overdue/upcoming task dates with styled messages."""
-    try:
-        if pd.notna(task_date):
-            if hasattr(task_date, 'date'):
-                task_date = task_date.date()
-            else:
-                task_date = pd.to_datetime(task_date).date()
-
-            days_left = (task_date - today).days
-            if days_left < 0:
-                st.error(f"Overdue by {abs(days_left)} days")
-            else:
-                st.warning(f"{days_left} days left")
-        else:
-            st.info("No due date set")
-    except:
-        st.caption("Date error")
-
-def create_alert_section(urgent_tasks: pd.DataFrame, overdue_tasks: pd.DataFrame) -> None:
-    """Creates the main alert section for the dashboard."""
-    if not urgent_tasks.empty or not overdue_tasks.empty:
+    with st.expander("⚠️ Alerts", expanded=False):
+        st.markdown('<span style="font-size:14px; font-weight:200; margin-bottom:-35px; display:block;">Select to Show Upcoming Events</span>', unsafe_allow_html=True)
         col1, col2 = st.columns(2)
+        with col1:
+            show_urgent = st.toggle("Urgent", value=False)
+        with col2:
+            show_upcoming = st.toggle("Upcoming", value=False)
 
-        if not urgent_tasks.empty:
-            col1.markdown(f"""<div class="alert-urgent"><strong>⚠️ {len(urgent_tasks)} Urgent Tasks</strong><br>
-                         Due within 3 days</div>""", unsafe_allow_html=True)
-
-        if not overdue_tasks.empty:
-            col2.markdown(f"""<div class="alert-warning"><strong>📅 {len(overdue_tasks)} Overdue Tasks</strong><br>
-                         Past due date</div>""", unsafe_allow_html=True)
-
-def company_selector_widget(full_df: pd.DataFrame, filtered_df: pd.DataFrame) -> Optional[str]:
-    """
-    Renders a company selection dropdown.
-    """
-    if full_df.empty or "company_name" not in full_df.columns:
-        st.warning("No company data available.")
-        return None
-
-    if not filtered_df.empty and len(filtered_df) < len(full_df):
-        available_companies = sorted(filtered_df["company_name"].unique())
-        st.info(f"Showing {len(available_companies)} companies based on current filters. Clear filters to see all companies.")
+    with st.expander("🏛️ Company Filters", expanded=False):
+        companies = st.multiselect("Company Name", sorted(df["company_name"].unique()) if "company_name" in df.columns else [])
+        region = st.multiselect("Region", get_lookup_values("region"))
+        country = st.multiselect("Country", get_lookup_values("country"))
+        sector = st.multiselect("GICS Sector", get_lookup_values("gics_sector"))
+    with st.expander("🗣️ Engagement Type", expanded=False):
+        progs = st.multiselect("Engagement Program", get_lookup_values("program"))
+        themes = st.multiselect("Theme", get_lookup_values("theme"))
+        objectives = st.multiselect("Objective", get_lookup_values("objective"))
+        esg_option = st.radio("ESG Focus", ["All", "E", "S", "G"], index=0, horizontal=True)
+    if esg_option == "All":
+        esg = ["e", "s", "g"]
     else:
-        available_companies = sorted(full_df["company_name"].unique())
+        esg = [esg_option.lower()]
+    with st.expander("👥 Engagement Status", expanded=False):
+        mile = st.multiselect("Milestone", get_lookup_values("milestone"))
+        status = st.multiselect("Status", get_lookup_values("milestone_status"))
 
-    return st.selectbox("Select Company", [""] + available_companies)
+    return progs, sector, region, country, mile, status, esg, show_urgent, show_upcoming, companies, themes, objectives
 
-def display_interaction_history(engagement_id: int) -> None:
-    """Fetches and displays the interaction history for an engagement."""
-    try:
-        interactions = get_interactions_for_company(engagement_id)
-
-        if not interactions:
-            st.info("No interactions recorded for this company.")
-            return
-
-        interactions_df = pd.DataFrame(interactions)
-        interactions_df['interaction_date'] = pd.to_datetime(interactions_df['interaction_date'])
-        interactions_df = interactions_df.sort_values(by='interaction_date', ascending=False)
-
-        if len(interactions_df) > 1:
-            show_chart_title("Interaction Timeline")
-            fig = go.Figure()
-            unique_types = interactions_df['interaction_type'].unique()
-            # Use CB_SAFE_PALETTE for interaction types
-            color_map = {itype: Config.CB_SAFE_PALETTE[i % len(Config.CB_SAFE_PALETTE)] for i, itype in enumerate(unique_types)}
-            
-            for _, row in interactions_df.iterrows():
-                fig.add_trace(go.Scatter(
-                    x=[row["interaction_date"]], y=[1], mode='markers+text',
-                    marker=dict(size=15, color=color_map.get(row["interaction_type"], Config.CB_SAFE_PALETTE[0])),
-                    text=row.get("interaction_type", "N/A"), textposition="top center",
-                    name=row.get("interaction_type", "N/A"),
-                    hoverinfo='text',
-                    hovertext=f"<b>{row.get('interaction_type')}</b><br>{row.get('interaction_summary')}"
-                ))
-            
-            fig.update_layout(title="", yaxis_visible=False, height=200, showlegend=False, paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)')
-            st.plotly_chart(fig, use_container_width=True)
-
-
-        st.markdown("### Recent Interactions")
-        for _, interaction in interactions_df.iterrows():
-            with st.expander(f"{interaction.get('interaction_type', 'N/A')} - {interaction['interaction_date'].strftime('%Y-%m-%d')}"):
-                col1, col2 = st.columns(2)
-                col1.markdown(f"**Milestone:** {interaction.get('milestone', 'N/A')}")
-                col1.markdown(f"**Outcome:** {interaction.get('outcome_status', 'N/A')}")
-                col2.markdown(f"**Logged By:** {interaction.get('logged_by', 'N/A')}")
-                col2.markdown(f"**Logged Date:** {interaction.get('logged_date', 'N/A')}")
-                st.markdown("**Summary:**")
-                st.write(interaction.get("interaction_summary", "No summary available."))
-
-    except Exception as e:
-        st.error(f"Error loading interaction data: {e}")
-
-def create_esg_gauge(label: str, value: int, colour: str) -> dict:
-    """
-    Return an ECharts option dict for a minimalist ESG engagement gauge
-    """
-    return {
-        "series": [
-            {
-                "type": "gauge",
-                "startAngle": 180,
-                "endAngle": 0,
-                "radius": "100%",
-                "center": ["50%", "75%"],
-                # appearance
-                "itemStyle": {"color": colour},
-                "progress": {"show": True, "width": 18},
-                "axisLine": {"lineStyle": {"width": 18, "color": [[1, "#f0f2f6"]]}},
-                "splitLine": {"show": False},
-                "axisTick": {"show": False},
-                "axisLabel": {"show": False},
-                "pointer": {"show": False},
-                "anchor": {"show": False},
-                # data & labels
-                "data": [{"value": value, "name": label}],
-                "title": {
-                    "show": True,
-                    "offsetCenter": [0, "-40%"],
-                    "fontSize": 16,
-                    "fontWeight": 600,
-                    "color": "#262730"
-                },
-                "detail": {
-                    "formatter": "{value}%",
-                    "offsetCenter": [0, 0],
-                    "fontSize": 28,
-                    "fontWeight": 700,
-                    "color": "#262730",
-                },
-            }
-        ]
-    }
-
-
-# --- FILTER FUNCTIONS ---
-
-def sidebar_filters(df: pd.DataFrame) -> tuple:
-    with st.sidebar:
-        st.markdown("### 🔍 Filters")
-        with st.expander("🚨 Alerts", expanded=False):
-            show_urgent = st.checkbox("Show urgent only")
-            show_overdue = st.checkbox("Show overdue only")
-        with st.expander("🏢 Company Selection", expanded=False):
-            companies = st.multiselect("Company Name", sorted(df["company_name"].unique()) if "company_name" in df.columns else [])
-        with st.expander("📊 Engagement Type", expanded=False):
-            progs = st.multiselect("Engagement Program", get_lookup_values("program"))
-        with st.expander("🌍 Geo & Sector", expanded=False):
-            region = st.multiselect("Region", get_lookup_values("region"))
-            country = st.multiselect("Country", get_lookup_values("country"))
-            sector = st.multiselect("GICS Sector", get_lookup_values("gics_sector"))
-        with st.expander("🎯 Engagement Status", expanded=False):
-            mile = st.multiselect("Milestone", get_lookup_values("milestone"))
-            status = st.multiselect("Status", get_lookup_values("milestone_status"))
-        
-        with st.expander("🏷️ Themes & Content", expanded=False):
-            themes = st.multiselect("Theme", get_lookup_values("theme"))
-            interaction_search = st.text_input("Search Interaction Summary", help="Search within interaction summaries")
-
-        with st.expander("🌱 ESG Focus", expanded=True):
-            col_e, col_s, col_g = st.columns(3)
-            env = col_e.checkbox("E", value=True)
-            soc = col_s.checkbox("S", value=True)
-            gov = col_g.checkbox("G", value=True)
-
-    esg = [c for c, b in zip(["e", "s", "g"], [env, soc, gov]) if b] or ["e", "s", "g"]
-    return progs, sector, region, country, mile, status, esg, show_urgent, show_overdue, companies, themes, interaction_search
-
-def apply_filters(df: pd.DataFrame, filters: tuple) -> pd.DataFrame:
+def apply_filters(df, filters):
     if df.empty:
         return df
 
-    progs, sector, region, country, mile, status, esg, show_urgent, show_overdue, companies, themes, interaction_search = filters
+    progs, sector, region, country, mile, status, esg, show_urgent, show_upcoming, companies, themes, objectives = filters
     filtered_df = df.copy()
 
     filter_map = {"program": progs, "gics_sector": sector, "region": region,
@@ -382,28 +99,19 @@ def apply_filters(df: pd.DataFrame, filters: tuple) -> pd.DataFrame:
     if themes and "theme" in filtered_df.columns:
         filtered_df = filtered_df[filtered_df["theme"].isin(themes)]
 
-    if interaction_search and "interactions" in filtered_df.columns:
-        def search_interactions(interactions_json):
-            try:
-                if pd.isna(interactions_json): return False
-                interactions_list = json.loads(interactions_json)
-                return any(interaction_search.lower() in interaction.get("interaction_summary", "").lower() for interaction in interactions_list)
-            except (json.JSONDecodeError, TypeError):
-                return False
-        mask = filtered_df["interactions"].apply(search_interactions)
-        filtered_df = filtered_df[mask]
-
     if esg and all(col in filtered_df.columns for col in esg):
         filtered_df = filtered_df[filtered_df[esg].any(axis=1)]
 
     if show_urgent and "urgent" in filtered_df.columns:
         filtered_df = filtered_df[filtered_df["urgent"]]
-    if show_overdue and "overdue" in filtered_df.columns:
-        filtered_df = filtered_df[filtered_df["overdue"]]
+    if show_upcoming and "next_action_date" in filtered_df.columns:
+        today = pd.to_datetime(datetime.now().date())
+        filtered_df = filtered_df[(pd.to_datetime(filtered_df["next_action_date"]) - today).dt.days.between(0, 30, inclusive="both")]
+
+    if objectives and "objective" in filtered_df.columns:
+        filtered_df = filtered_df[filtered_df["objective"].isin(objectives)]
 
     return filtered_df
-
-# --- PAGE-RENDERING FUNCTIONS ---
 
 def dashboard():
     data = st.session_state['DATA']
@@ -412,118 +120,103 @@ def dashboard():
         st.warning("No engagement data available or no data matches the current filters.")
         return
 
-    urgent_tasks = data[data.get("urgent", False)]
-    overdue_tasks = data[data.get("overdue", False)]
-    create_alert_section(urgent_tasks, overdue_tasks)
+    today = pd.to_datetime(datetime.now().date())
+    this_week = data[(pd.to_datetime(data.get("next_action_date")) - today).dt.days.between(0, 6, inclusive="both")]
+    this_month = data[(pd.to_datetime(data.get("next_action_date")) - today).dt.days.between(7, 30, inclusive="both")]
+    create_alert_section(this_week, this_month)
 
-    st.markdown("### 📈 Key Metrics")
+    render_icon_header(Config.HEADER_ICONS["metrics"], "Key Metrics")
+    
     total = len(data)
-    completed = data.get("is_complete", pd.Series(dtype=bool)).sum()
-    on_time = data.get("on_time", pd.Series(dtype=bool)).sum()
-    late = data.get("late", pd.Series(dtype=bool)).sum()
-    active = total - completed
-    completion_rate = (completed / total * 100) if total > 0 else 0
-    effectiveness = (on_time / (on_time + late) * 100) if (on_time + late) > 0 else 0
-    
-    create_metric_row([
-        ("Total Engagements", total), ("Completion Rate", f"{completion_rate:.1f}%"),
-        ("On‑time Effectiveness", f"{effectiveness:.1f}%"), ("Active Engagements", active), ("Overdue", late)
-    ])
+    # Active Engagements: milestone not in the excluded list
+    exclude_milestones_active = ["not started", "verified", "success", "cancelled"]
+    active = data["milestone"].str.lower().apply(lambda x: x not in exclude_milestones_active if pd.notna(x) else False).sum() if "milestone" in data.columns else 0
 
-    # ESG Engagement Theme Gauges - Prominently displayed
-    st.markdown("### ESG Engagement Focus Areas")
-    st.caption("Distribution of engagements across CDP **Climate Change**, **Water**, and **Forests** themes. These gauges show the percentage of active engagements in each ESG pillar.")
+    # Completed Engagements: milestone in the completed list
+    completed_milestones = ["success", "full disclosure", "partial disclosure", "verified"]
+    completed = data["milestone"].str.lower().isin([m.lower() for m in completed_milestones]).sum() if "milestone" in data.columns else 0
+
+    # Success Rate
+    success_milestones = ["Success", "Full Disclosure", "Partial Disclosure", "Verified"]
+    success_count = data["milestone"].isin(success_milestones).sum() if "milestone" in data.columns else 0
+    success_rate = round((success_count / total * 100)) if total > 0 else 0
+
+    # Not Started count: milestone == 'Not Started' (case-insensitive)
+    not_started_count = data["milestone"].str.lower().eq("not started").sum() if "milestone" in data.columns else 0
+
+    # Failed Engagements: milestone == 'cancelled' (case-insensitive)
+    failed_count = data["milestone"].str.lower().eq("cancelled").sum() if "milestone" in data.columns else 0
+
+    # Fail Rate: percentage of engagements where milestone == 'cancelled'
+    fail_rate = round((failed_count / total * 100)) if total > 0 else 0
+
+    # Engagement Health Status (distribution of active engagements by milestone_status)
+    active_engagements = data[data["milestone_status"].str.lower() != "complete"] if "milestone_status" in data.columns else data
+    health_counts = (
+        active_engagements["milestone_status"].value_counts()
+        if "milestone_status" in active_engagements.columns else pd.Series()
+    )
+    health_statuses = ["Red", "Amber", "Green"]
+    health_data = {status: health_counts.get(status, 0) for status in health_statuses}
+
+    # Layout: metrics in two columns, milestone chart on right
+    col1, col2, col3 = st.columns([1, 1, 3])
+    with col1:
+        st.metric("Total Engagements", total)
+        st.markdown(" ")
+        st.metric("Not Started", not_started_count)
+        st.markdown(" ")
+        st.metric("Success Rate", f"{success_rate}%")
+    with col2:
+        st.metric("Active Engagements", active)
+        st.markdown(" ")
+        st.metric("Completed", completed)
+        st.markdown(" ")
+        st.metric("Fail Rate", f"{fail_rate}%")
+    with col3:
+        st.markdown(f'<div style="margin-top:-50px; margin-bottom:8px;"><span class="material-icons-outlined" style="vertical-align:middle;color:#333333;font-size:40px;font-weight:100;">{Config.HEADER_ICONS["milestone"]}</span><span style="vertical-align:middle;font-size:28px;font-weight:600;margin-left:10px;">Milestone Progress</span></div>', unsafe_allow_html=True)
+        st.write(Config.CHART_CONTEXTS["milestone"])
+        if "milestone" in data.columns and not data["milestone"].dropna().empty:
+            chart_data = data["milestone"].value_counts()
+            fig = create_chart(chart_data, chart_type="bar")
+            st.plotly_chart(fig, use_container_width=True)
+
+    render_icon_header(Config.HEADER_ICONS["esg"], "ESG Engagement Focus Areas")
+    st.markdown(
+        '<div style="margin-bottom:-100px;">'
+        '<span style="font-size:16px; color:#6c757d;">Distribution of engagements across CDP <b>Climate Change</b>, <b>Water</b>, <b>Forests</b>, and <b>Other</b> themes. Shows active engagements with percentage of total portfolio.</span>'
+        '</div>',
+        unsafe_allow_html=True
+    )
     
-    # Calculate ESG percentages
     esg_data = {}
-    esg_colors = {
-        "Climate Change": "#2E8B57",  # Sea Green
-        "Water": "#4682B4",         # Steel Blue  
-        "Forests": "#9370DB"      # Medium Purple
-    }
+    total_unfiltered = len(st.session_state['FULL_DATA'])
     
-    if total > 0:
-        # Check if ESG columns exist and calculate percentages
-        for pillar, col in [("Climate Change", "e"), ("Water", "s"), ("Forests", "g")]:
+    if total > 0 and total_unfiltered > 0:
+        theme_columns = ["Climate Change", "Water", "Forests", "Other"]
+        total_theme_ys = sum((data[col] == "Y").sum() for col in theme_columns if col in data.columns)
+        for theme, col in [("Climate Change", "Climate Change"), ("Water", "Water"), ("Forests", "Forests"), ("Other", "Other")]:
             if col in data.columns:
-                # Count Y values (positive entries)
-                positive_count = len(data[data[col] == "Y"])
-                percentage = round((positive_count / total) * 100)
-                esg_data[pillar] = percentage
+                count = (data[col] == "Y").sum()
+                percentage_of_total = round((count / total_theme_ys) * 100) if total_theme_ys > 0 else 0
+                esg_data[theme] = (count, percentage_of_total)
             else:
-                esg_data[pillar] = 0
+                esg_data[theme] = (0, 0)
     
-    # Display ESG gauges in a row
     if esg_data:
-        cols = st.columns(3)
-        for i, (theme, percentage) in enumerate(esg_data.items()):
+        cols = st.columns(4)
+        for i, (theme, (count, percentage)) in enumerate(esg_data.items()):
             with cols[i]:
-                option = create_esg_gauge(theme, percentage, esg_colors[theme])
+                gauge_percentage = round((count / total_theme_ys) * 100) if total_theme_ys > 0 else 0
+                option = create_esg_gauge(theme, count, Config.ESG_COLORS[theme], gauge_percentage)
+                option["series"][0]["detail"]["formatter"] = str(count)
+                option["series"][0]["data"][0]["value"] = gauge_percentage
                 st_echarts(options=option, height="300px", key=f"esg-{theme}")
-    
-    st.divider()
 
-    # Status breakdown chart
-    context_col, chart_col = st.columns([1.6, 3.8])
-    st.container(border = True)
-    with context_col:
-        st.markdown("#### Status Overview")
-        st.markdown("Breakdown of engagement statuses")
-        st.markdown("")
-    with chart_col:
-        # Calculate status counts
-        active_count = (data["milestone_status"] == "In Progress").sum() if "milestone_status" in data.columns else 0
-        complete_count = (data["milestone_status"] == "Complete").sum() if "milestone_status" in data.columns else 0
-        not_started_count = (data["milestone_status"] == "Not Started").sum() if "milestone_status" in data.columns else 0
+    render_icon_header(Config.HEADER_ICONS["table"], "Engagement Table")
+    create_aggrid_component(data, Config.AGGRID_COLUMNS)
 
-        # Create 4 columns, use only the last 3 for metrics
-        spacer, col1, col2, col3 = st.columns([0.5, 1, 1, 1])
-        with col1:
-            st.metric("Active Engagements", 10)
-        with col2:
-            st.metric("Completed Engagements", complete_count)
-        with col3:
-            st.metric("Engagements Yet to Start", 200)
-
-    # Outcome status bar chart
-    if "outcome_status" in data.columns and not data["outcome_status"].dropna().empty:
-        context_col, chart_col = st.columns([1, 2])
-        with context_col:
-            show_chart_title("✅ Outcome Status")
-            st.write("Distribution of engagement outcomes.")
-        with chart_col:
-            st.plotly_chart(create_outcome_barchart(data), use_container_width=True)
-
-
-    # Sector distribution chart
-    if "gics_sector" in data.columns and not data["gics_sector"].dropna().empty:
-        context_col, chart_col = st.columns([1, 2])
-        with context_col:
-            show_chart_title("🏢 Sector Distribution")
-            st.write("Distribution of engagements across different GICS sectors, helping identify which industries are most actively engaged.")
-        with chart_col:
-            with st.spinner('Loading sector data...'):
-                st.plotly_chart(create_chart(data["gics_sector"].value_counts(), "Engagements by Sector", "Sector"), use_container_width=True)
-
-    # Regional distribution chart
-    if "region" in data.columns and not data["region"].dropna().empty:
-        context_col, chart_col = st.columns([1, 2])
-        with context_col:
-            show_chart_title("🌍 Regional Distribution")
-            st.write("Geographic spread of engagements by region, providing insights into global engagement coverage and regional focus areas.")
-        with chart_col:
-            with st.spinner('Loading regional data...'):
-                st.plotly_chart(create_chart(data["region"].value_counts(), "Engagements by Region", "Region"), use_container_width=True)
-
-    # Milestone progress chart
-    if "milestone" in data.columns and not data["milestone"].dropna().empty:
-        context_col, chart_col = st.columns([1, 2])
-        with context_col:
-            show_chart_title("🎯 Milestone Progress")
-            st.write("Current milestone stages across all engagements, showing progress through the engagement lifecycle from initiation to completion.")
-        with chart_col:
-            with st.spinner('Loading milestone data...'):
-                st.plotly_chart(create_chart(data["milestone"].value_counts(), "Engagements by Milestone Stage", "Milestone"), use_container_width=True)
+    render_hr(margin_top=100, margin_bottom=100)
 
 def engagement_operations():
     tab1, tab2 = st.tabs(["➕ Create Engagement", "📝 Log Interaction"])
@@ -548,12 +241,7 @@ def engagement_operations():
             objective = st.selectbox("Objective", [""] + get_lookup_values("objective"))
 
             st.markdown("### ESG Focus Areas *")
-            col_e, col_s, col_g = st.columns(3)
-            esg_flags = {
-                "e": col_e.checkbox("Environmental"),
-                "s": col_s.checkbox("Social"),
-                "g": col_g.checkbox("Governance"),
-            }
+            esg = get_esg_selection()
 
             st.markdown("### Timeline")
             col1, col2 = st.columns(2)
@@ -566,14 +254,14 @@ def engagement_operations():
                     "isin": isin, "aqr_id": aqr_id, "program": program, "country": country,
                     "theme": theme, "objective": objective,
                     "start_date": start_date, "target_date": target_date, "created_by": "System",
-                    **esg_flags
+                    **{"e": "e" in esg, "s": "s" in esg, "g": "g" in esg}
                 }
                 success, message = create_engagement(engagement_data)
                 if success:
-                    show_custom_success(message)
+                    st.success(message)
                     st.balloons()
                 else:
-                    show_custom_error(message)
+                    st.error(message)
 
     with tab2:
         st.markdown("### Log Interaction")
@@ -589,11 +277,10 @@ def engagement_operations():
         engagement_data = full_df[full_df["company_name"] == selected_company].iloc[0]
 
         with st.expander("Current Engagement Status", expanded=True):
-            create_info_display([
-                ("Current Milestone", engagement_data.get("milestone", "N/A")),
-                ("Status", engagement_data.get("milestone_status", "N/A")),
-                ("Escalation", engagement_data.get("escalation_level", "N/A"))
-            ], use_html=True)
+            cols = st.columns(3)
+            cols[0].markdown(f"**Current Milestone**<br>{engagement_data.get('milestone', 'N/A')}", unsafe_allow_html=True)
+            cols[1].markdown(f"**Status**<br>{engagement_data.get('milestone_status', 'N/A')}", unsafe_allow_html=True)
+            cols[2].markdown(f"**Escalation**<br>{engagement_data.get('escalation_level', 'N/A')}", unsafe_allow_html=True)
 
         with st.form("log_interaction"):
             st.markdown("### Interaction Details")
@@ -614,7 +301,7 @@ def engagement_operations():
 
             if st.form_submit_button("Log Interaction", type="primary"):
                 if not interaction_summary.strip() or not interaction_type:
-                    show_custom_error("Interaction type and summary are required.")
+                    st.error("Interaction type and summary are required.")
                 else:
                     with st.spinner('Logging interaction...'):
                         interaction_log_data = {
@@ -630,10 +317,10 @@ def engagement_operations():
                         }
                     success, message = log_interaction(interaction_log_data)
                     if success:
-                        show_custom_success(message)
+                        st.success(message)
                         st.rerun()
                     else:
-                        show_custom_error(message)
+                        st.error(message)
 
 def task_management():
     filtered_df = st.session_state['DATA']
@@ -642,14 +329,15 @@ def task_management():
         st.warning("No tasks available for the current filters.")
         return
 
-    all_upcoming_tasks = get_upcoming_tasks(df=filtered_df, days=14)
-    urgent_tasks = all_upcoming_tasks[all_upcoming_tasks['days_to_next_action'] <= 3]
-    warning_tasks = all_upcoming_tasks[(all_upcoming_tasks['days_to_next_action'] > 3) & (all_upcoming_tasks['days_to_next_action'] <= 7)]
+    all_upcoming_tasks = get_upcoming_tasks(df=filtered_df, days=Config.UPCOMING_DAYS)
+    urgent_tasks = all_upcoming_tasks[all_upcoming_tasks['days_to_next_action'] <= Config.URGENT_DAYS]
+    warning_tasks = all_upcoming_tasks[(all_upcoming_tasks['days_to_next_action'] > Config.URGENT_DAYS) & 
+                                      (all_upcoming_tasks['days_to_next_action'] <= Config.WARNING_DAYS)]
 
-    create_metric_row([
-        ("Urgent (≤3 days)", len(urgent_tasks)),
-        ("Warning (≤7 days)", len(warning_tasks)),
-        ("Upcoming (≤14 days)", len(all_upcoming_tasks))
+    render_metrics([
+        (f"Urgent (≤{Config.URGENT_DAYS} days)", len(urgent_tasks)),
+        (f"Warning (≤{Config.WARNING_DAYS} days)", len(warning_tasks)),
+        (f"Upcoming (≤{Config.UPCOMING_DAYS} days)", len(all_upcoming_tasks))
     ])
 
     if len(filtered_df) < len(st.session_state['FULL_DATA']):
@@ -677,11 +365,11 @@ def task_management():
                         if col3.button("Mark Complete", key=f"task_{task['engagement_id']}"):
                             success, msg = update_milestone_status(task['engagement_id'], "Complete")
                             if success:
-                                show_custom_success(msg)
+                                st.success(msg)
                                 st.rerun()
                             else:
-                                show_custom_error(msg)
-                        st.divider()
+                                st.error(msg)
+                        render_hr(margin_top=4, margin_bottom=8)
             else:
                 st.info(f"No {label.lower()} tasks! 🎉")
 
@@ -696,22 +384,56 @@ def enhanced_analysis():
     tab1, tab2, tab3, tab4 = st.tabs(["🎯 Engagement Analysis", "🌍 Geographic Analysis", "⏱️ Monthly Trends", "📈 Engagement Effectiveness"])
 
     with tab1:
-        st.markdown("### ESG Focus Distribution")
-        esg_data = pd.Series({
-            "Environmental": df.get("e", pd.Series(dtype=bool)).astype(bool).sum(),
-            "Social": df.get("s", pd.Series(dtype=bool)).astype(bool).sum(),
-            "Governance": df.get("g", pd.Series(dtype=bool)).astype(bool).sum()
-        })
-        if not esg_data.empty and esg_data.sum() > 0:
-            st.plotly_chart(create_chart(esg_data, "ESG Focus Distribution", "Flag", "pie"), use_container_width=True)
-        else:
-            st.info("No ESG focus data to display.")
+        context_col, chart_col = st.columns([1.5, 1])
+        with context_col:
+            st.markdown(f'<div style="margin-top:8px; margin-bottom:8px;"><span class="material-icons-outlined" style="vertical-align:middle;color:#333333;font-size:40px;font-weight:100;">{Config.HEADER_ICONS["esg"]}</span><span style="vertical-align:middle;font-size:28px;font-weight:600;margin-left:10px;">ESG Focus Distribution</span></div>', unsafe_allow_html=True)
+            st.write("Distribution of engagements by ESG focus area (Environmental, Social, Governance). Shows count of active engagements.")
+        with chart_col:
+            esg_data = pd.Series({
+                "Environmental": df.get("e", pd.Series(dtype=bool)).astype(bool).sum(),
+                "Social": df.get("s", pd.Series(dtype=bool)).astype(bool).sum(),
+                "Governance": df.get("g", pd.Series(dtype=bool)).astype(bool).sum()
+            })
+            if not esg_data.empty and esg_data.sum() > 0:
+                fig = create_chart(esg_data, chart_type="pie")
+                st.plotly_chart(fig, use_container_width=True)
+            else:
+                st.info("No ESG focus data to display.")
+
+        if "gics_sector" in df.columns and not df["gics_sector"].dropna().empty:
+            context_col, chart_col = st.columns([1, 2])
+            with context_col:
+                st.markdown(f'<div style="margin-top:8px; margin-bottom:8px;"><span class="material-icons-outlined" style="vertical-align:middle;color:#333333;font-size:40px;font-weight:100;">{Config.HEADER_ICONS["sector"]}</span><span style="vertical-align:middle;font-size:28px;font-weight:600;margin-left:10px;">Sector Distribution</span></div>', unsafe_allow_html=True)
+                st.write(Config.CHART_CONTEXTS["sector"])
+            with chart_col:
+                chart_data = df["gics_sector"].value_counts()
+                fig = create_chart(chart_data, chart_type="bar")
+                st.plotly_chart(fig, use_container_width=True)
+        if "region" in df.columns and not df["region"].dropna().empty:
+            regions = sorted(df["region"].dropna().unique())
+            selected_region = st.selectbox("Select Region to break out by country", ["All Regions"] + regions, key="analytics_region_selector")
+            if selected_region == "All Regions":
+                region_df = df
+            else:
+                region_df = df[df["region"] == selected_region]
+            context_col, chart_col = st.columns([1, 2])
+            with context_col:
+                st.markdown(f'<div style="margin-top:8px; margin-bottom:8px;"><span class="material-icons-outlined" style="vertical-align:middle;color:#333333;font-size:40px;font-weight:100;">{Config.HEADER_ICONS["region"]}</span><span style="vertical-align:middle;font-size:28px;font-weight:600;margin-left:10px;">Regional Distribution</span></div>', unsafe_allow_html=True)
+                st.write(Config.CHART_CONTEXTS["region"])
+                if selected_region != "All Regions":
+                    st.write(f"Showing country breakdown for region: **{selected_region}**")
+            with chart_col:
+                if not region_df.empty and "country" in region_df.columns:
+                    chart_data = region_df["country"].value_counts()
+                    fig = create_chart(chart_data, chart_type="bar")
+                    st.plotly_chart(fig, use_container_width=True)
+                else:
+                    st.info("No country data to display for this region.")
 
     with tab2:
         st.markdown("### Geographic Engagement Distribution")
         
         available_regions = sorted(df["region"].unique())
-        
         selected_region = st.selectbox(
             "Select Region",
             ["Global"] + available_regions,
@@ -741,53 +463,30 @@ def enhanced_analysis():
 
         with col2:
             if not geo_df.empty and "country" in geo_df.columns:
-                # Prepare country data
                 country_data = geo_df.groupby("country").size().reset_index(name="count")
                 
-                # Simple country name to ISO-3 mapping for common countries
-                country_iso_map = {
-                    'USA': 'USA', 'United States': 'USA',
-                    'UK': 'GBR', 'United Kingdom': 'GBR',
-                    'Germany': 'DEU', 'France': 'FRA',
-                    'Japan': 'JPN', 'Canada': 'CAN',
-                    'Australia': 'AUS', 'China': 'CHN',
-                    'India': 'IND', 'Brazil': 'BRA',
-                    'Italy': 'ITA', 'Spain': 'ESP',
-                    'Netherlands': 'NLD', 'Switzerland': 'CHE',
-                    'Sweden': 'SWE', 'Norway': 'NOR',
-                    'Denmark': 'DNK', 'Finland': 'FIN',
-                    'Belgium': 'BEL', 'Austria': 'AUT',
-                    'South Korea': 'KOR', 'Mexico': 'MEX',
-                    'Russia': 'RUS', 'South Africa': 'ZAF',
-                    'Singapore': 'SGP', 'Hong Kong': 'HKG',
-                    'New Zealand': 'NZL', 'Ireland': 'IRL'
-                }
-                
-                country_data['iso_code'] = country_data['country'].map(country_iso_map)
+                country_data['iso_code'] = country_data['country'].map(Config.COUNTRY_ISO_MAP)
                 mapped_countries = country_data.dropna(subset=['iso_code']).copy()
                 
                 if not mapped_countries.empty:
-                    # Create enhanced choropleth map
-                    # Create custom colorscale using CB_SAFE_PALETTE colors
                     custom_colorscale = [
-                        [0.0, Config.CB_SAFE_PALETTE[4]],  # Light green
-                        [0.25, Config.CB_SAFE_PALETTE[0]], # Teal
-                        [0.5, Config.CB_SAFE_PALETTE[2]],  # Blue
-                        [0.75, Config.CB_SAFE_PALETTE[1]], # Orange
-                        [1.0, Config.CB_SAFE_PALETTE[3]]   # Pink
+                        [0.0, Config.CB_SAFE_PALETTE[4]],
+                        [0.25, Config.CB_SAFE_PALETTE[0]],
+                        [0.5, Config.CB_SAFE_PALETTE[2]],
+                        [0.75, Config.CB_SAFE_PALETTE[1]],
+                        [1.0, Config.CB_SAFE_PALETTE[3]]
                     ]
                     
-                    fig = px.choropleth(
+                    fig = create_chart(
                         mapped_countries,
+                        chart_type="choropleth",
                         locations="iso_code",
                         color="count",
                         hover_name="country",
                         color_continuous_scale=custom_colorscale,
-                        labels={"count": "Engagements"},
                         range_color=[0, mapped_countries['count'].max()]
                     )
                     
-                    # Update layout for better aesthetics
                     fig.update_layout(
                         geo=dict(
                             bgcolor='rgba(0,0,0,0)',
@@ -807,15 +506,11 @@ def enhanced_analysis():
                             visible=True
                         ),
                         height=400,
-                        margin=dict(l=0, r=0, t=0, b=0),
-                        paper_bgcolor='rgba(0,0,0,0)',
-                        plot_bgcolor='rgba(0,0,0,0)'
+                        margin=dict(l=0, r=0, t=0, b=0)
                     )
                     
-                    # Enhanced colorbar
                     fig.update_coloraxes(
                         colorbar=dict(
-                            title=dict(text="Engagements", font=dict(size=12)),
                             thickness=15,
                             len=0.7,
                             x=1.02,
@@ -824,34 +519,24 @@ def enhanced_analysis():
                         )
                     )
                     
-                    # Clean hover template
                     fig.update_traces(
                         hovertemplate="<b>%{hovertext}</b><br>Engagements: %{z}<extra></extra>"
                     )
                     
                     st.plotly_chart(fig, use_container_width=True)
                 else:
-                    # Fallback to bar chart if no country mapping available
-                    fig = px.bar(
+                    fig = create_chart(
                         country_data.sort_values('count', ascending=True).tail(10),
+                        chart_type="bar",
                         x='count', y='country', orientation='h',
-                        color='count', color_continuous_scale='viridis',
-                        labels={'count': 'Engagements', 'country': ''}
+                        color='count', color_continuous_scale='viridis'
                     )
-                    fig.update_layout(
-                        height=400,
-                        margin=dict(l=0, r=0, t=20, b=0),
-                        paper_bgcolor='rgba(0,0,0,0)',
-                        plot_bgcolor='rgba(0,0,0,0)',
-                        showlegend=False
-                    )
-                    fig.update_xaxes(title="Number of Engagements")
                     st.plotly_chart(fig, use_container_width=True)
             else:
                 st.info("No geographic data to display.")
 
     with tab3:
-        show_chart_title("Monthly Engagement Trends")
+        st.subheader("Monthly Engagement Trends")
         if not analytics_data["monthly_trends"].empty:
             with st.spinner('Loading trend data...'):
                 fig = go.Figure()
@@ -865,16 +550,16 @@ def enhanced_analysis():
                 ))
                 fig.update_layout(
                     title="", 
-                    xaxis_title="Month", 
-                    yaxis_title="New Engagements", 
                     paper_bgcolor='rgba(0,0,0,0)', 
                     plot_bgcolor='rgba(0,0,0,0)',
                     hovermode='x unified'
                 )
+                fig.update_xaxes(title="")
+                fig.update_yaxes(title="")
                 st.plotly_chart(fig, use_container_width=True)
 
     with tab4:
-        show_chart_title("Engagement Effectiveness by Sector")
+        st.subheader("Engagement Effectiveness by Sector")
         if not analytics_data["success_rates"].empty:
             with st.spinner('Loading effectiveness data...'):
                 fig = px.bar(
@@ -882,41 +567,68 @@ def enhanced_analysis():
                     x="gics_sector", 
                     y="success_rate", 
                     title="", 
-                    labels={"success_rate": "Success Rate (%)", "gics_sector": "Sector"},
                     color="success_rate",
                     color_continuous_scale=[Config.CB_SAFE_PALETTE[4], Config.CB_SAFE_PALETTE[0]]
                 )
                 fig.update_layout(paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)')
+                fig.update_xaxes(title="")
+                fig.update_yaxes(title="")
                 st.plotly_chart(fig, use_container_width=True)
-
 
 def company_deep_dive():
     full_df = st.session_state['FULL_DATA']
     filtered_df = st.session_state['DATA']
 
     selected_company = company_selector_widget(full_df, filtered_df)
-    
     if not selected_company:
         return
 
     company_data = full_df[full_df["company_name"] == selected_company].iloc[0]
-    
-    st.markdown(f"## {company_data['company_name']}")
-    create_info_display([
-        ("Sector", company_data.get("gics_sector", "N/A")),
-        ("Region", company_data.get("region", "N/A")),
-        ("Status", company_data.get("milestone_status", "N/A")),
-        ("Escalation", company_data.get("escalation_level", "N/A"))
-    ], use_html=True)
 
-    st.markdown("### ESG Focus Areas")
-    esg_focus = [label for flag, label in [("e", "Environmental"), ("s", "Social"), ("g", "Governance")] if company_data.get(flag)]
-    st.write(", ".join(esg_focus) if esg_focus else "Not specified")
+    # --- Header ---
+    with st.container(border=True):
+        render_icon_header("apartment", f"Company Snapshot: {company_data['company_name']}", icon_size=32, text_size=28)
+        # --- Company Info Card ---
+        col1, col2, col3 = st.columns([2, 2, 2])
+        with col1:
+            st.markdown(f"**Sector:** {company_data.get('gics_sector', 'N/A')}")
+        with col2:
+            st.markdown(f"**Region:** {company_data.get('region', 'N/A')}")
+        with col3:
+            st.markdown(f"**Country:** {company_data.get('country', 'N/A')}")
+        render_hr(margin_top=0, margin_bottom=0)
 
-    st.markdown("### Interaction History")
+    with st.container(border=True):
+        # --- Metrics Snapshot ---
+        days_since_contact = (datetime.now() - company_data['last_interaction_date']).days if pd.notna(company_data['last_interaction_date']) else 'N/A'
+        days_to_next_action = (company_data['next_action_date'] - datetime.now()).days if pd.notna(company_data['next_action_date']) else 'N/A'
+        total_interactions = len(get_interactions_for_company(company_data['engagement_id']))
+        render_icon_header("camera_alt", f"Engagement Snapshot", icon_size=38, text_size=28)
+        col1, col2, col3 = st.columns([2, 2, 2])
+        with col1:
+            st.markdown(f"**Program:** {company_data.get('program', 'N/A')}")
+        with col2:
+            st.markdown(f"**Objective:** {company_data.get('objective', 'N/A')}")
+        with col3:
+            st.markdown(f"**Engagement Health:** {company_data.get('milestone_status', 'N/A')}")
+
+    #st.markdown("**Themes**")
+    #themes = [label for flag, label in [("Climate Change", "Climate Change"), ("Forests", "Forests"), ("Water", "Water"), ("Other", "Other")] if company_data.get(flag)]
+   # st.write(", ".join(themes) if themes else "Not specified")
+
+   # st.markdown("**Milestones**")
+#**Days Since Last Contact:** {days_since_contact}  
+#**Next Action Due (Days):** {days_to_next_action}  
+#**Total Interactions:** {total_interactions}  
+#**Escalation Level:** {company_data.get('escalation_level', 'N/A')}  
+#**Status:** {company_data.get('milestone', 'N/A')}
+#""")
+    render_hr(margin_top=10, margin_bottom=10)
+
+    #--- Interaction History ---
+    render_icon_header("history", "Interaction History")
     display_interaction_history(company_data['engagement_id'])
-
-# --- APP NAVIGATION AND EXECUTION ---
+    render_hr(margin_top=10, margin_bottom=10)
 
 PAGE_FUNCTIONS = {
     "dashboard": dashboard,
@@ -927,9 +639,8 @@ PAGE_FUNCTIONS = {
 }
 
 def navigation():
-    """Sets up the sidebar navigation and triggers data filtering."""
     with st.sidebar:
-        st.markdown(f"### {Config.APP_TITLE}")
+        st.markdown(""" \n """)
         
         page_titles = list(PAGES_CONFIG.keys())
         page_icons = [PAGES_CONFIG[p]['icon'] for p in page_titles]
@@ -948,21 +659,49 @@ def navigation():
         )
         
         st.session_state.selected_page = selected_page_title
+
+        render_hr(margin_top=0, margin_bottom=-0)
+
+        # Filtering heading
+        col1, col2 = st.columns([5, 2.5])
+        with col1:
+            st.markdown(
+                f'''
+                <div style="margin-left:15px; margin-top:0px; margin-bottom:2px;">
+                    <span class="material-icons-outlined" style="vertical-align:middle;color:#333333;font-size:22px;font-weight:300;">{Config.HEADER_ICONS["filter"]}</span>
+                    <span style="vertical-align:middle;font-size:20px;font-weight:500;margin-left:5px;">Toggle Filtering</span>
+                </div>
+                ''',
+                unsafe_allow_html=True
+            )
+        with col2:
+            enable_filtering = st.toggle(
+                "",
+                label_visibility = "visible",
+                value=False,
+                key="enable_filtering_toggle",
+                help="Filtering is active when toggled on. To reset filters Toggle off." 
+            )
+
+        render_hr(margin_top=-0, margin_bottom=8)
         
-        st.markdown("---")
-        filters = sidebar_filters(st.session_state['FULL_DATA'])
-        st.session_state['DATA'] = apply_filters(st.session_state['FULL_DATA'], filters)
-    
+        if enable_filtering:
+            filters = sidebar_filters(st.session_state['FULL_DATA'])
+            st.session_state['DATA'] = apply_filters(st.session_state['FULL_DATA'], filters)
+        else:
+            st.session_state['DATA'] = st.session_state['FULL_DATA'].copy()
 
 def main():
-    """Main application entry point."""
-    st.title(Config.APP_TITLE.split(" Platform")[0])
+    render_icon_header(Config.HEADER_ICONS["app_title"], Config.APP_TITLE, icon_size=32, text_size=32)
+    st.markdown('<div style="margin-top:-33px;"></div>', unsafe_allow_html=True)
+    render_hr()
     
     if 'validator' not in st.session_state:
         with st.spinner('Loading data...'):
             df, choices = load_db()
+            df = fix_column_names(df)
             if df.empty and not choices:
-                show_custom_error("Failed to load data or config. The application cannot start.")
+                st.error("Failed to load data or config. The application cannot start.")
                 return
             st.session_state.validator = DataValidator(choices)
             st.session_state.FULL_DATA = get_latest_view(df)
@@ -986,7 +725,7 @@ def main():
             page_function_to_call()
 
     except Exception as e:
-        show_custom_error(f"An unexpected application error occurred: {e}")
+        st.error(f"An unexpected application error occurred: {e}")
         st.exception(e)
         if st.button("Clear Cache and Reload"):
             st.cache_data.clear()
